@@ -60,7 +60,9 @@ To use it directly via `deps.edn`:
 
 (def selected
   (ms/select schema
-    [::ms/pick [:or [:map [:name]]]]))
+    [::ms/pick [:or
+                (ms/select [])
+                (ms/select [:name])]]))
 
 (m/validate selected {:name "Mallisel"}) ;=> true
 ```
