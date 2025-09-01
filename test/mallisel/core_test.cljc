@@ -22,7 +22,14 @@
                 [:map
                  [:k1 string?]]
                 [:map
-                 [:k2 string?]]]]))
+                 [:k2 string?]]]]
+   [:multi-schema [:multi {:dispatch :type}
+                   ["t1" [:map
+                          [:type string?]
+                          [:k1 string?]]]
+                   [::m/default [:map
+                                 [:type string?]
+                                 [:k2 string?]]]]]))
 
 (t/deftest selection
   (let [selected (ms/select Proc [:proc-id
@@ -48,6 +55,24 @@
 
 (comment
   (selection)
+  )
+
+(t/deftest selection-multi
+  (let [selected (ms/select Proc [[:multi-schema [["t1" {:selection-p "selection-p"}
+                                                   [:k1]]]]])]
+    (t/is (= (m/form selected)
+             '[:map
+               [:multi-schema
+                [:multi {:dispatch :type}
+                 ["t1" {:selection-p "selection-p"}
+                  [:map [:k1 string?]]]
+                 [:malli.core/default
+                  :map]]]]))
+    (t/is (= (m/form Proc)
+             (-> selected m/options ::ms/selected-from-schema m/form)))))
+
+(comment
+  (selection-multi)
   )
 
 (t/deftest selection-path
@@ -77,45 +102,6 @@
 
 (comment
   (selection-path)
-  )
-
-(t/deftest pick
-  (let [selected (ms/select Proc [[:branching (ms/pick [:cat {:optional true}
-                                                        (ms/select [])
-                                                        (ms/select [:k2])])]])]
-    (t/is (= (m/form selected)
-             '[:map [:branching
-                     [:cat {:optional true}
-                      :map
-                      [:map [:k2 string?]]]]]))))
-
-(comment
-  (pick)
-  )
-
-(t/deftest pick-path
-  (let [selected (ms/select Proc [[:branching (ms/pick [:cat
-                                                        (ms/select [])
-                                                        (ms/select [:k2])])]])
-        path->schemas-atom (atom {})]
-    (m/walk selected (fn [schema _ _ _]
-                       (let [path (-> schema m/-options ::ms/path)]
-                         (swap! path->schemas-atom update (m/form schema) (fnil conj #{}) path))))
-    (t/is (= @path->schemas-atom
-             '{:map #{[:branching]}
-               string? #{[:branching :k2]}
-               [:map [:k2 string?]] #{[:branching]}
-               [:cat
-                :map
-                [:map [:k2 string?]]] #{[:branching]}
-               [:map
-                [:branching
-                 [:cat
-                  :map
-                  [:map [:k2 string?]]]]] #{[]}}))))
-
-(comment
-  (pick-path)
   )
 
 

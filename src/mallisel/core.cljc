@@ -75,50 +75,134 @@
     (m/-deref schema)
     schema))
 
-(declare select-impl-dispatch)
+(defn- collect-valid-keys [schema valid-keys-volatile]
+  (let [schema (maybe-deref-schema schema)
+        schema? (m/schema? schema)
+        schema-type (when schema? (m/-type (m/-parent schema)))]
+    (cond (or (= schema-type :map) (= schema-type :multi))
+          (doseq [entry (m/-children schema)]
+            (vswap! valid-keys-volatile conj (first entry)))
+          schema?
+          (let [children (m/-children schema)]
+            (when (seq children)
+              (doseq [child children]
+                (collect-valid-keys child valid-keys-volatile))))
+          :else
+          nil)))
 
-(defn- select-impl [schema options path selection]
-  (let [schema (maybe-deref-schema schema)]
-    (cond (m/-entry-schema? schema)
+(declare select-impl)
+
+(defn- select-map-entry [options
+                         path
+                         selection
+                         selected-keys-volatile
+                         selected-count-volatile
+                         entry]
+  (let [k (first entry)
+        sub-selection (get-subselection path options selection)
+        _ (validate-subselection-size path options sub-selection)
+        selection-properties (get-selection-properties
+                              path options selection)
+        entry-child (get entry 2)
+        properties (second entry)
+        properties-merger (:properties-merger options)
+        merged-properties (properties-merger
+                           properties selection-properties)
+        selected-sub-selection (select-impl
+                                entry-child
+                                options
+                                (conj path k)
+                                sub-selection
+                                nil)]
+    (vswap! selected-count-volatile inc)
+    (when selected-keys-volatile
+      (vswap! selected-keys-volatile conj k))
+    (if (seq merged-properties)
+      [k merged-properties selected-sub-selection]
+      [k selected-sub-selection])))
+
+(defn- validate-map-entries [schema options path selection selected-keys-volatile selected-count-volatile]
+  (when (and (nil? selected-keys-volatile)
+             (not= @selected-count-volatile (count selection)))
+    (let [schema-keys (into #{} (map first) (m/-children schema))
+          selection-keys (into #{} (get-selection-keys selection))
+          invalid-selection-keys (clojure.set/difference selection-keys schema-keys)]
+      (throw (ex-info (str "Invalid selection keys: " invalid-selection-keys ". Valid keys are: " schema-keys ", at path " path)
+                      {:path path
+                       :selection (:full-selection options)
+                       :invalid-selection-keys invalid-selection-keys
+                       :valid-selection-keys schema-keys})))))
+
+(defn- select-impl [schema options path selection selected-keys-volatile]
+  (let [schema (maybe-deref-schema schema)
+        schema? (m/schema? schema)
+        schema-type (when schema? (m/-type (m/-parent schema)))]
+    (cond (= schema-type :map)
           (let [schema-options (assoc (m/-options schema) ::path path)
+                selected-count-volatile (volatile! 0)
                 children (doall
                           (for [entry (m/-children schema)
                                 :let [k (first entry)
                                       selection (lookup-selection path options selection k)]
-                                :when selection
-                                :let [sub-selection (get-subselection path options selection)
-                                      _ (validate-subselection-size path options sub-selection)
-                                      selection-properties (get-selection-properties
-                                                            path options selection)
-                                      entry-child (get entry 2)
-                                      properties (second entry)
-                                      properties-merger (:properties-merger options)
-                                      merged-properties (properties-merger
-                                                         properties selection-properties)
-                                      selected-sub-selection (select-impl-dispatch entry-child options (conj path k) sub-selection)]]
-                            (if (seq merged-properties)
-                              [k merged-properties selected-sub-selection]
-                              [k selected-sub-selection])))]
-            (when (not= (count children) (count selection))
-              (let [schema-keys (into #{} (map first) (m/-children schema))
-                    selection-keys (into #{} (get-selection-keys selection))
-                    invalid-selection-keys (clojure.set/difference selection-keys schema-keys)]
-                (throw (ex-info (str "Invalid selection keys: " invalid-selection-keys ". Valid keys are: " schema-keys ", at path " path)
-                                {:path path
-                                 :selection (:full-selection options)
-                                 :invalid-selection-keys invalid-selection-keys
-                                 :valid-selection-keys schema-keys}))))
+                                :when selection]
+                            (select-map-entry options
+                                              path
+                                              selection
+                                              selected-keys-volatile
+                                              selected-count-volatile
+                                              entry)))]
+            (validate-map-entries schema
+                                  options
+                                  path
+                                  selection
+                                  selected-keys-volatile
+                                  selected-count-volatile)
             (m/-into-schema
              (m/-parent schema)
              (m/-properties schema)
              children
              schema-options))
-          (m/schema? schema)
+          (= schema-type :multi)
+          (let [schema-options (assoc (m/-options schema) ::path path)
+                selected-count-volatile (volatile! 0)
+                children (doall
+                          (for [entry (m/-children schema)
+                                :let [k (first entry)
+                                      selection (lookup-selection path options selection k)]]
+                            (if selection
+                              (select-map-entry options
+                                                path
+                                                selection
+                                                selected-keys-volatile
+                                                selected-count-volatile
+                                                entry)
+                              (let [sub-selection []
+                                    entry-child (get entry 2)
+                                    selected-sub-selection (select-impl
+                                                            entry-child
+                                                            options
+                                                            (conj path k)
+                                                            sub-selection
+                                                            nil)]
+                                [k selected-sub-selection]))))]
+            (validate-map-entries schema
+                                  options
+                                  path
+                                  selection
+                                  selected-keys-volatile
+                                  selected-count-volatile)
+            (m/-into-schema
+             (m/-parent schema)
+             (m/-properties schema)
+             children
+             schema-options))
+          schema?
           (let [children (m/-children schema)
                 schema-options (assoc (m/-options schema) ::path path)]
             (if (empty? children)
               (do
-                (when-not (empty? selection)
+                (when (and (nil? selected-keys-volatile)
+                           (not (empty? selection)))
                   (throw (ex-info (str "Invalid selection. Unexpected subselection " selection ", at path " path)
                                   {:path path
                                    :selection (:full-selection options)
@@ -127,101 +211,42 @@
                                 (m/-properties schema)
                                 children
                                 schema-options))
-              (let [children (doall
-                              (for [child children]
-                                (select-impl child options path selection)))]
+              (let [new-selected-keys-volatile (when (nil? selected-keys-volatile)
+                                                 (volatile! #{}))
+                    selected-children (doall
+                                       (for [child children]
+                                         (select-impl child
+                                                      options
+                                                      path
+                                                      selection
+                                                      (or selected-keys-volatile
+                                                          new-selected-keys-volatile))))]
+                (when (and new-selected-keys-volatile
+                           (not= (count @new-selected-keys-volatile) (count selection)))
+                  (let [selection-keys (into #{} (get-selection-keys selection))
+                        invalid-selection-keys (clojure.set/difference
+                                                selection-keys
+                                                @new-selected-keys-volatile)
+                        schema-keys-volatile (volatile! #{})]
+                    (doseq [child children]
+                      (collect-valid-keys child schema-keys-volatile))
+                    (throw (ex-info (str "Invalid selection keys: " invalid-selection-keys ". Valid keys are: " @schema-keys-volatile ", at path " path)
+                                    {:path path
+                                     :selection (:full-selection options)
+                                     :invalid-selection-keys invalid-selection-keys
+                                     :valid-selection-keys @schema-keys-volatile}))))
                 (m/-into-schema (m/-parent schema)
                                 (m/-properties schema)
-                                children
+                                selected-children
                                 schema-options))))
           :else
           (do
-            (when-not (empty? selection)
+            (when (and (nil? selected-keys-volatile) (not (empty? selection)))
               (throw (ex-info (str "Invalid selection. Unexpected subselection " selection ", at path " path)
                               {:path path
                                :selection (:full-selection options)
                                :invalid-selection selection})))
             schema))))
-
-(defn- select-impl-pick [schema options path selection]
-  (let [selection-type (first selection)
-        selection-type (if (m/into-schema? selection-type)
-                         (m/-type selection-type)
-                         selection-type)]
-    (if (= selection-type ::select)
-      (select-impl-dispatch schema options path (second selection))
-      (let [schema (maybe-deref-schema schema)]
-        (when-not (m/schema? schema)
-          (throw (ex-info (str "Invalid pick of non schema. Invalid pick " schema ", at path " path)
-                          {:path path
-                           :selection (:full-selection options)
-                           :invalid-pick schema})))
-        (when (m/-entry-schema? schema)
-          (throw (ex-info (str "Invalid pick of entry schema. Invalid pick " (m/-type (m/parent schema)) ", at path " path)
-                          {:path path
-                           :selection (:full-selection options)
-                           :invalid-pick schema})))
-        (let [schema-type (m/-type (m/parent schema))
-              children (m/-children schema)
-              schema-options (assoc (m/-options schema) ::path path)]
-          (when (not= schema-type selection-type)
-            (throw (ex-info (str "Pick selection does not match schema. Invalid selection is " selection ", at path " path)
-                            {:path path
-                             :selection (:full-selection options)
-                             :pick-shema schema
-                             :invalid-selection selection
-                             :selection-type selection-type})))
-          (let [selection (rest selection)
-                pick-properties (first selection)
-                pick-properties (when (map? pick-properties) pick-properties)
-                selection (if pick-properties (rest selection) selection)
-                properties-merger (:properties-merger options)
-                properties (m/-properties schema)
-                merged-properties (properties-merger properties pick-properties)
-                children (loop [children children
-                                selection selection
-                                selected-children []]
-                           (cond (and (nil? (seq children)) (nil? (seq selection)))
-                                 selected-children
-                                 (nil? (seq children))
-                                 (throw (ex-info (str "Invalid selection. Unexpected subselection " selection ", at path " path)
-                                                 {:path path
-                                                  :selection (:full-selection options)
-                                                  :pick-shema schema
-                                                  :invalid-selection (first selection)}))
-                                 (nil? (seq selection))
-                                 (throw (ex-info (str "Missing subselection, at path " path)
-                                                 {:path path
-                                                  :selection (:full-selection options)
-                                                  :pick-shema schema}))
-                                 (not (m/schema? (first children)))
-                                 (do
-                                   (when (not= (first children) (first selection))
-                                     (throw (ex-info (str "Pick selection does not match schema. Invalid selection is " (first selection) ", at path " path)
-                                                     {:path path
-                                                      :selection (:full-selection options)
-                                                      :pick-shema schema
-                                                      :invalid-selection (first selection)})))
-                                   (recur (rest children)
-                                          (rest selection)
-                                          (conj selected-children (first children))))
-                                 :else
-                                 (let [selected-child (select-impl-pick (first children) options path (first selection))]
-                                   (recur (rest children)
-                                          (rest selection)
-                                          (conj selected-children selected-child)))))]
-            (m/-into-schema (m/-parent schema)
-                            merged-properties
-                            children
-                            schema-options)))))))
-
-(defn- select-impl-dispatch [schema options path selection]
-  (cond (= ::pick (first selection))
-        (select-impl-pick schema options path (second selection))
-        (= ::select (first selection))
-        (select-impl schema options path (second selection))
-        :else
-        (select-impl schema options path selection)))
 
 (defn- assoc-selected-schema-options [selected-from-schema selection selected-schema-options]
   (assoc selected-schema-options
@@ -229,8 +254,6 @@
          ::selection selection))
 
 (defn select
-  ([selection]
-   [::select selection])
   ([schema selection]
    (select schema selection nil))
   ([schema selection {:keys [properties-merger] :as options}]
@@ -241,11 +264,8 @@
                    options
                    (assoc options :properties-merger default-properties-merger))
          options (assoc options :full-selection selection)
-         selected-schema (select-impl-dispatch schema options [] selection)]
+         selected-schema (select-impl schema options [] selection nil)]
      (m/-update-options selected-schema (partial assoc-selected-schema-options selected-from-schema selection)))))
-
-(defn pick [selection]
-  [::pick selection])
 
 #?(:clj
    (defmacro map-o [& body]

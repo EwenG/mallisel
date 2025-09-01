@@ -1,16 +1,17 @@
 # 🧩 Mallisel
 
-**Mallisel** is a Clojure library for selecting subtrees from [Malli](https://github.com/metosin/malli) schemas. It provides a way to declaratively extract parts of a schema based on keys or branching paths (like `:or`, `:cat`, etc.)
+**Mallisel** is a Clojure library for selecting subtrees from [Malli](https://github.com/metosin/malli) schemas. It provides a way to declaratively extract parts of a schema based on `:map` keys and `:multi` entries
 
 ---
 
 ## ✨ Features
 
 - Select specific keys from `:map` schemas
-- Navigate and extract schema branches from sum types (`:or`, `:cat`, `:tuple`, etc.)
+- Navigate and extract schema branches from `:multi` types
+- Navigate and extract schema branches from sum types (`:or`, `and`, `sequential`, `:cat`, `:tuple`, etc.)
 - Automatically handles schema dereferencing (`:ref`, `:var`, etc.)
 - Validates selections and errors on incorrect paths
-- Supports optional metadata merging (e.g., `:optional`)
+- Supports schema metadata merging (e.g., `:optional`)
 
 ---
 
