@@ -121,12 +121,25 @@
       [k merged-properties selected-sub-selection]
       [k selected-sub-selection])))
 
+(defn compute-duplicate-selection-keys [selection-keys]
+  (->> (for [[id freq] (frequencies selection-keys)
+            :when (> freq 1)] 
+         id)
+       (into #{}))) 
+
 (defn- validate-map-entries [schema options path selection selected-keys-volatile selected-count-volatile]
   (when (and (nil? selected-keys-volatile)
              (not= @selected-count-volatile (count selection)))
     (let [schema-keys (into #{} (map first) (m/-children schema))
-          selection-keys (into #{} (get-selection-keys selection))
-          invalid-selection-keys (clojure.set/difference selection-keys schema-keys)]
+          selection-keys (get-selection-keys selection)
+          selection-keys-set (set selection-keys)
+          invalid-selection-keys (clojure.set/difference selection-keys-set schema-keys)]
+      (when (not= (count selection-keys) (count selection-keys-set))
+        (let [duplicate-selection-keys (compute-duplicate-selection-keys selection-keys)]
+          (throw (ex-info (str "Duplicate selection keys: " duplicate-selection-keys ", at path " path)
+                          {:path path
+                           :selection (:full-selection options)
+                           :duplicate-selection-keys duplicate-selection-keys}))))
       (throw (ex-info (str "Invalid selection keys: " invalid-selection-keys ". Valid keys are: " schema-keys ", at path " path)
                       {:path path
                        :selection (:full-selection options)
@@ -223,11 +236,19 @@
                                                           new-selected-keys-volatile))))]
                 (when (and new-selected-keys-volatile
                            (not= (count @new-selected-keys-volatile) (count selection)))
-                  (let [selection-keys (into #{} (get-selection-keys selection))
+                  (let [selection-keys (get-selection-keys selection)
+                        selection-keys-set (set (get-selection-keys selection))
                         invalid-selection-keys (clojure.set/difference
-                                                selection-keys
+                                                (set selection-keys)
                                                 @new-selected-keys-volatile)
                         schema-keys-volatile (volatile! #{})]
+                    (when (not= (count selection-keys) (count selection-keys-set))
+                      (let [duplicate-selection-keys (compute-duplicate-selection-keys
+                                                      selection-keys)]
+                        (throw (ex-info (str "Duplicate selection keys: " duplicate-selection-keys ", at path " path)
+                                        {:path path
+                                         :selection (:full-selection options)
+                                         :duplicate-selection-keys duplicate-selection-keys}))))
                     (doseq [child children]
                       (collect-valid-keys child schema-keys-volatile))
                     (throw (ex-info (str "Invalid selection keys: " invalid-selection-keys ". Valid keys are: " @schema-keys-volatile ", at path " path)
