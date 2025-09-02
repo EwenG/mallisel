@@ -1,120 +1,160 @@
-# 🧩 Mallisel
+# mallisel
 
-**Mallisel** is a Clojure library for selecting subtrees from [Malli](https://github.com/metosin/malli) schemas. It provides a way to declaratively extract parts of a schema based on `:map` keys and `:multi` entries
+A Clojure library for selecting `:map` keys from [Malli](https://github.com/metosin/malli) schemas.
 
----
+`mallisel` lets you derive smaller schemas from larger ones by **selecting specific keys**, while preserving metadata and relationships. It works with nested maps, sequences, recursive schemas, and multi-schemas.
 
-## ✨ Features
+## Features
 
-- Select specific keys from `:map` schemas
-- Navigate and extract schema branches from `:multi` types
-- Navigate and extract schema branches from sum types (`:or`, `and`, `sequential`, `:cat`, `:tuple`, etc.)
-- Automatically handles schema dereferencing (`:ref`, `:var`, etc.)
-- Validates selections and errors on incorrect paths
-- Supports schema metadata merging (e.g., `:optional`)
+- Select keys from `:map` schemas.
+- Treat selections as **required keys** (on top of optionalized schemas).
+- `map-o` macro for defining maps with all keys optional (since Malli has no built-in way to do this).
+- Support for nested and recursive schemas.
+- Works with `:sequential`, `:multi`, and other Malli schema types.
+- Preserves schema metadata (`:optional`, custom options, etc.).
+- Custom **properties merger** function support when combining properties.
+- Validates that selections reference only existing keys.
+- Keeps track of selection paths and the originating schema.
+- For branching schemas (`:multi`, `:cat`, etc.), selections are applied to all branches. For `:multi`, specific dispatch values can be targeted, while other branches are preserved.
+- Provides `validator` / `validate` functions that behave like Malli’s counterparts, but require a **selected schema** and validate values against both the **optionalized schema** and the **selected schema**.
 
----
+## Usage
 
-## 📦 Installation
-
-Mallisel is not yet published on Clojars.
-
-To use it directly via `deps.edn`:
-
-```clojure
-{eweng/mallisel {:git/url "https://github.com/EwenG/mallisel"
-                 :sha "<latest-commit-sha>"}}
-```
-
----
-
-## 🚀 Usage
-
-### Selecting map keys
+Require the namespace:
 
 ```clojure
-(require '[mallisel.core :as ms])
-(require '[malli.core :as m])
-
-(def schema
-  [:map
-   [:id int?]
-   [:name string?]
-   [:age int?]])
-
-(def selected
-  (ms/select schema
-    [[:id] [:name]]))
-
-(m/validate selected {:id 1 :name "Ada"}) ;=> true
+(ns your.ns
+  (:require [malli.core :as m]
+            [mallisel.core :as ms]))
 ```
 
----
+## Defining optionalized maps
 
-### Selecting schema branches (e.g., `:or`)
+Since Malli does not have a built-in way to make all keys optional, `mallisel` provides `map-o`:
 
-```Clojure
-(def schema
-  [:or
-   [:map [:id int?]]
-   [:map [:name string?]]])
+```clojure
+(def ID (m/-simple-schema {:type :ID :pred string?}))
 
-(def selected
-  (ms/select schema
-    [::ms/pick [:or
-                (ms/select [])
-                (ms/select [:name])]]))
+(def Proc
+  (ms/map-o
+   [:proc-id ID]
+   [:stages [:sequential [:map [:stage-id ID]]]]))
 
-(m/validate selected {:name "Mallisel"}) ;=> true
+(m/form Proc)
+;; => [:map {:optional true} [:proc-id :ID] [:stages [:sequential [:map [:stage-id :ID]]]]]
+
 ```
 
----
+## Basic selection
 
-### Nested selection
+Selecting keys marks them as required:
 
-```Clojure
-(def schema
-  [:map
-   [:user [:map
-           [:id int?]
-           [:name string?]]]
-   [:meta [:map
-           [:timestamp inst?]]]])
-
-(def selected
-  (ms/select schema
-    [[:user [[:name]]]]))
-
-(m/validate selected {:user {:name "Ada"}}) ;=> true
+```clojure
+(ms/select Proc [:proc-id])
+;; => [:map [:proc-id :ID]]
 ```
 
----
+## Nested selection
 
-## 🧠 Conceptual Model
+```clojure
+(def Stage
+  (ms/map-o
+   [:stage-id {:global-p "global-p"} ID]
+   [:proc [:ref #'Proc]]))
 
-Mallisel provides a declarative way to extract or focus on specific parts of a Malli schema. You can think of it as a schema-aware, safe `select` mechanism that understands the structure and semantics of Malli schemas.
+(def Proc
+  (ms/map-o
+   [:proc-id ID]
+   [:stages [:sequential [:ref #'Stage]]]))
 
-- **Tree traversal**: `select` walks through `:map` schemas by matching keys provided in the selection vector.
-- **Branch handling**: `pick` is used to handle branching schema types like `:or`, `:cat`, `:tuple`, and more. It allows selecting specific paths inside these schema branches.
-- **Dereferencing**: Schema references like `:ref`, `:var`, or custom registry types are automatically resolved during selection.
-- **Property merging**: You can attach metadata (e.g., `{:optional true}`) to selected keys, which are merged into the resulting schema entries.
-- **Strict validation**: If a selection refers to a non-existent key or branch, Mallisel throws detailed, path-aware errors to prevent silent failures.
-
----
-
-## 📘 API Overview
-
-```Clojure
-(ms/select schema selection)              ;; select map keys and subtrees
-(ms/select selection)                     ;; builds a ::select node (for nesting)
-(ms/pick selection)                       ;; builds a ::pick node (for branching)
+(ms/select Proc
+           [:proc-id
+            [:stages {:optional true}
+             [[:stage-id {:selection-p "selection-p"}]
+              [:proc [[:stages [:stage-id]]]]]]])
 ```
 
-### Selection syntax
+Produces:
 
-```Clojure
-[[:key1 [:subkey1]]             ;; nested key selection
- [:key2 {:optional true}]       ;; merge properties into key
- [::ms/pick [:or [:branch1]]]   ;; pick schema branch
-]
+```clojure
+[:map
+ [:proc-id :ID]
+ [:stages {:optional true}
+  [:sequential
+   [:map
+    [:stage-id {:global-p "global-p"
+                :selection-p "selection-p"} :ID]
+    [:proc
+     [:map
+      [:stages
+       [:sequential
+        [:map
+         [:stage-id {:global-p "global-p"} :ID]]]]]]]]]]
+```
+
+## Multi-schemas
+
+Selections work inside `:multi` dispatch schemas:
+
+```clojure
+(def Proc
+  (ms/map-o
+   [:multi-schema [:multi {:dispatch :type}
+                   ["t1" [:map [:type string?] [:k1 string?]]]
+                   [::m/default [:map [:type string?] [:k2 string?]]]]]))
+
+(ms/select Proc [[:multi-schema [["t1" {:selection-p "selection-p"} [:k1]]]]])
+```
+
+Result
+
+```clojure
+[:map
+ [:multi-schema
+  [:multi {:dispatch :type}
+   ["t1" {:selection-p "selection-p"}
+    [:map [:k1 string?]]]
+   [:malli.core/default :map]]]]
+```
+
+Note: unlike maps, all dispatch branches are kept; selections apply only to targeted branches.
+
+## Paths
+
+Every schema node includes its **selection path** under `::ms/path`. For example:
+
+```clojure
+(let [selected (ms/select Proc [[:stages [:stage-id]]])]
+  (m/walk selected
+          (fn [schema _ _ _]
+            (-> schema m/-options ::ms/path))))
+```
+
+## Validation
+
+mallisel provides `validator` and `validate` functions. They work like Malli’s, but must be given a **selected schema**, and they validate against both:
+
+- the **optionalized schema** (ensuring structural correctness)
+- the **selected schema** (ensuring selected keys are present and valid)
+  
+Example:
+
+```clojure
+(def selected (ms/select Proc [:proc-id]))
+(def validate-proc (ms/validator selected))
+
+;; passes: required key present
+(validate-proc {:proc-id "abc"})
+;; => true
+
+;; fails: required key missing
+(validate-proc {})
+;; => false
+
+;; structural correctness check (against optionalized schema)
+(validate-proc {:proc-id "abc" :stages [{:stage-id 123}]})
+;; => false ; :stage-id must be a string (ID schema)
+
+(validate-proc {:proc-id "abc" :stages [{:stage-id "s1"}]})
+;; => true
 ```

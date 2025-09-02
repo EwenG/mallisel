@@ -269,9 +269,9 @@
                                :invalid-selection selection})))
             schema))))
 
-(defn- assoc-selected-schema-options [selected-from-schema selection selected-schema-options]
+(defn- assoc-selected-schema-options [optionalized-schema selection selected-schema-options]
   (assoc selected-schema-options
-         ::selected-from-schema selected-from-schema
+         ::optionalized-schema optionalized-schema
          ::selection selection))
 
 (defn select
@@ -279,15 +279,53 @@
    (select schema selection nil))
   ([schema selection {:keys [properties-merger] :as options}]
    (let [schema (m/schema schema)
-         selected-from-schema (::selected-from-schema (m/-options schema))
-         selected-from-schema (or selected-from-schema schema)
+         optionalized-schema (::optionalized-schema (m/-options schema))
+         optionalized-schema (or optionalized-schema schema)
          options (if properties-merger
                    options
                    (assoc options :properties-merger default-properties-merger))
          options (assoc options :full-selection selection)
          selected-schema (select-impl schema options [] selection nil)]
-     (m/-update-options selected-schema (partial assoc-selected-schema-options selected-from-schema selection)))))
+     (m/-update-options selected-schema (partial assoc-selected-schema-options optionalized-schema selection)))))
 
 #?(:clj
    (defmacro map-o [& body]
      (macros/map-o-impl body)))
+
+(defn get-optionalized-schema [schema]
+  (-> schema m/options ::optionalized-schema))
+
+(comment
+  (m/options (select [:multi {:dispatch :type}
+                     [:t1 string?]
+                      [:t2 (map-o [:k2 string?])]]
+                     [[:t2 [:k2]]]))
+
+  (let [vv (validator (select [:multi {:dispatch :type}
+                              [:t1 string?]
+                              [:t2 (map-o [:k2 string?])]]
+                              [[:t2 [#_:k2]]]))]
+    (vv {:type :t2
+         :k2 33}))
+
+  (validator [:multi {:dispatch :type}
+                              [:t1 string?]
+              [:t2 (map-o [:k2 string?])]])
+
+  (m/validator (select [:multi {:dispatch :type}
+                        [:t1 string?]
+                        [:t2 (map-o [:k2 string?])]]
+                       [[:t2 [:k2]]]))
+
+  m/explainer
+  )
+
+(defn validator [schema]
+  (let [selected-validator (m/validator schema)
+        optionalized-schema (get-optionalized-schema schema)
+        _ (when (nil? optionalized-schema)
+            (throw (ex-info "optionalized-schema is nil" {:schema schema})))
+        optionalized-schema-validator (m/validator optionalized-schema)]
+    (fn validator [x]
+      (and (optionalized-schema-validator x)
+           (selected-validator x)))))
