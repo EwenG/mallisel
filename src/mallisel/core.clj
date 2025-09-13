@@ -1,7 +1,41 @@
 (ns mallisel.core
   (:require [clojure.set]
             [malli.core :as m]
-            #?(:clj [mallisel.macros :as macros])))
+            [mallisel.macros :as macros]
+            [mallisel.protocols :as msp]))
+
+(defn- optionalize-child [child]
+  (let [c (count child)]
+    (cond (= c 2)
+          [(first child) {:optional true} (second child)]
+          (= c 3)
+          [(first child) (merge {:optional true} (second child)) (get child 2)]
+          :else child)))
+
+(defn -map-o-schema
+  ([]
+   (-map-o-schema {:naked-keys true}))
+  ([opts]
+   (let [map-schema (m/-map-schema opts)]
+     ^{:type ::m/into-schema}
+     (reify
+       m/AST
+       (m/-to-ast [_ options] (m/-to-ast map-schema options))
+       (m/-from-ast [_ ast options] (m/-from-ast map-schema ast options))
+       m/IntoSchema
+       (m/-type [_] (m/-type map-schema))
+       (m/-type-properties [_] (m/-type-properties map-schema))
+       (m/-properties-schema [_ options] (m/-properties-schema map-schema options))
+       (m/-children-schema [_ options] (m/-children-schema map-schema options))
+       (m/-into-schema [_ properties children options]
+         (let [children (mapv optionalize-child children)]
+           (m/-into-schema map-schema properties children options)))))))
+
+(defn default-schemas []
+  (assoc (m/default-schemas) :map (-map-o-schema)))
+
+(defn selected-schema? [x]
+  (= (type x) ::selected-schema))
 
 (defn- default-properties-merger [p1 p2]
   (if (:optional p2)
@@ -123,7 +157,7 @@
 
 (defn compute-duplicate-selection-keys [selection-keys]
   (->> (for [[id freq] (frequencies selection-keys)
-            :when (> freq 1)] 
+             :when (> freq 1)] 
          id)
        (into #{}))) 
 
@@ -156,14 +190,15 @@
                 children (doall
                           (for [entry (m/-children schema)
                                 :let [k (first entry)
-                                      selection (lookup-selection path options selection k)]
-                                :when selection]
-                            (select-map-entry options
-                                              path
-                                              selection
-                                              selected-keys-volatile
-                                              selected-count-volatile
-                                              entry)))]
+                                      selection (lookup-selection path options selection k)]]
+                            (if selection
+                              (select-map-entry options
+                                                path
+                                                selection
+                                                selected-keys-volatile
+                                                selected-count-volatile
+                                                entry)
+                              entry)))]
             (validate-map-entries schema
                                   options
                                   path
@@ -190,6 +225,7 @@
                                                 selected-count-volatile
                                                 entry)
                               (let [sub-selection []
+                                    properties (second entry)
                                     entry-child (get entry 2)
                                     selected-sub-selection (select-impl
                                                             entry-child
@@ -197,7 +233,7 @@
                                                             (conj path k)
                                                             sub-selection
                                                             nil)]
-                                [k selected-sub-selection]))))]
+                                [k properties selected-sub-selection]))))]
             (validate-map-entries schema
                                   options
                                   path
@@ -269,63 +305,95 @@
                                :invalid-selection selection})))
             schema))))
 
-(defn- assoc-selected-schema-options [optionalized-schema selection selected-schema-options]
-  (assoc selected-schema-options
-         ::optionalized-schema optionalized-schema
-         ::selection selection))
+(defn- remove-unselected-impl [schema]
+  (let [schema (maybe-deref-schema schema)
+        schema? (m/schema? schema)
+        schema-type (when schema? (m/-type (m/-parent schema)))
+        schema-options (when schema? (m/-options schema))
+        path (when schema? (::path schema-options))]
+    (cond (and (some? path)
+               (or (= schema-type :multi)
+                   (= schema-type :map)))
+          (let [children (doall
+                          (for [entry (m/-children schema)
+                                :let [k (first entry)
+                                      properties (second entry)
+                                      entry-child (get entry 2)
+                                      pruned-child (remove-unselected-impl entry-child)]
+                                :when pruned-child]
+                            [k properties pruned-child]))]
+            (m/-into-schema
+             (m/-parent schema)
+             (m/-properties schema)
+             children
+             schema-options))
+          (and (some? path) schema?)
+          (let [children (m/-children schema)]
+            (if (empty? children)
+              schema
+              (let [children (doall
+                              (for [child children]
+                                (remove-unselected-impl child)))]
+                (m/-into-schema (m/-parent schema)
+                                (m/-properties schema)
+                                children
+                                schema-options))))
+          (not schema?) schema
+          :else nil)))
+
+(defn remove-unselected [selected-schema]
+  (when selected-schema
+    (when-not (and
+               (m/schema? selected-schema)
+               (selected-schema? selected-schema))
+      (throw (ex-info "Not a SelectedSchema" {:schema selected-schema})))
+    (let [optionalized-schema (msp/-optionalized-schema selected-schema)
+          selection (msp/-selection selected-schema)]
+      (with-meta (remove-unselected-impl selected-schema)
+        {:type ::selected-schema
+         `msp/-optionalized-schema (fn -optionalized-schema [_]
+                                     optionalized-schema)
+         `msp/-selection (fn -selection [_]
+                           selection)
+         `msp/-remove-unselected (fn -remove-unselected [_]
+                                   (remove-unselected-impl
+                                    selected-schema))}))))
 
 (defn select
   ([schema selection]
    (select schema selection nil))
-  ([schema selection {:keys [properties-merger] :as options}]
-   (let [schema (m/schema schema)
-         optionalized-schema (::optionalized-schema (m/-options schema))
-         optionalized-schema (or optionalized-schema schema)
+  ([optionalized-schema selection {:keys [properties-merger] :as options}]
+   (let [optionalized-schema (m/schema optionalized-schema)
+         _ (when (selected-schema? optionalized-schema)
+             (throw (ex-info "Cannot select a SelectedSchema" {:schema optionalized-schema
+                                                               :selection selection})))
          options (if properties-merger
                    options
                    (assoc options :properties-merger default-properties-merger))
          options (assoc options :full-selection selection)
-         selected-schema (select-impl schema options [] selection nil)]
-     (m/-update-options selected-schema (partial assoc-selected-schema-options optionalized-schema selection)))))
+         selected-schema (select-impl optionalized-schema options [] selection nil)]
+     (with-meta selected-schema
+       {:type ::selected-schema
+        `msp/-optionalized-schema (fn -optionalized-schema [_]
+                                    optionalized-schema)
+        `msp/-selection (fn -selection [_]
+                          selection)
+        `msp/-remove-unselected (fn -remove-unselected [_]
+                                  (remove-unselected-impl
+                                   selected-schema))}))))
 
-#?(:clj
-   (defmacro map-o [& body]
-     (macros/map-o-impl body)))
+
+(defmethod print-method ::selected-schema [v ^java.io.Writer w]
+  (.write w "#mallisel.selected ")
+  (.write w (pr-str (m/-form (msp/-remove-unselected v)))))
+
+(defmacro map-o [& body]
+  (macros/map-o-impl body))
 
 (defn get-optionalized-schema [schema]
-  (-> schema m/options ::optionalized-schema))
+  (when schema
+    (msp/-optionalized-schema schema)))
 
-(comment
-  (m/options (select [:multi {:dispatch :type}
-                     [:t1 string?]
-                      [:t2 (map-o [:k2 string?])]]
-                     [[:t2 [:k2]]]))
-
-  (let [vv (validator (select [:multi {:dispatch :type}
-                              [:t1 string?]
-                              [:t2 (map-o [:k2 string?])]]
-                              [[:t2 [#_:k2]]]))]
-    (vv {:type :t2
-         :k2 33}))
-
-  (validator [:multi {:dispatch :type}
-                              [:t1 string?]
-              [:t2 (map-o [:k2 string?])]])
-
-  (m/validator (select [:multi {:dispatch :type}
-                        [:t1 string?]
-                        [:t2 (map-o [:k2 string?])]]
-                       [[:t2 [:k2]]]))
-
-  m/explainer
-  )
-
-(defn validator [schema]
-  (let [selected-validator (m/validator schema)
-        optionalized-schema (get-optionalized-schema schema)
-        _ (when (nil? optionalized-schema)
-            (throw (ex-info "optionalized-schema is nil" {:schema schema})))
-        optionalized-schema-validator (m/validator optionalized-schema)]
-    (fn validator [x]
-      (and (optionalized-schema-validator x)
-           (selected-validator x)))))
+(defn get-selection [schema]
+  (when schema
+    (msp/-selection schema)))
