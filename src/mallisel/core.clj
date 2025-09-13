@@ -1,7 +1,6 @@
 (ns mallisel.core
   (:require [clojure.set]
             [malli.core :as m]
-            [mallisel.macros :as macros]
             [mallisel.protocols :as msp]))
 
 (defn- optionalize-child [child]
@@ -386,9 +385,6 @@
 (defmethod print-method ::selected-schema [v ^java.io.Writer w]
   (.write w "#mallisel.selected ")
   (.write w (pr-str (m/-form (msp/-remove-unselected v)))))
-
-(defmacro map-o [& body]
-  (macros/map-o-impl body))
 
 (defn get-optionalized-schema [schema]
   (when schema
