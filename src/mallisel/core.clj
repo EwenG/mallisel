@@ -31,7 +31,7 @@
            (m/-into-schema map-schema properties children options)))))))
 
 (defn default-schemas []
-  (assoc (m/default-schemas) :map (-map-o-schema)))
+  (assoc (m/default-schemas) :map-o (-map-o-schema)))
 
 (defn selected-schema? [x]
   (= (type x) ::selected-schema))

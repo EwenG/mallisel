@@ -16,24 +16,24 @@
 (declare Proc)
 
 (def Stage
-  [:map
+  [:map-o
    [:stage-id {:global-p "global-p"} ID]
    [:proc [:ref #'Proc]]])
 
 (def Proc
-  [:map
+  [:map-o
    [:proc-id ID]
    [:stages [:sequential [:ref #'Stage]]]
    [:branching [:cat
-                [:map
+                [:map-o
                  [:k1 string?]]
-                [:map
+                [:map-o
                  [:k2 string?]]]]
    [:multi-schema [:multi {:dispatch :type}
-                   ["t1" [:map
+                   ["t1" [:map-o
                           [:type string?]
                           [:k1 string?]]]
-                   [::m/default [:map
+                   [::m/default [:map-o
                                  [:type string?]
                                  [:k2 string?]]]]]])
 
